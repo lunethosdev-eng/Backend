@@ -25,8 +25,18 @@ const fastify = Fastify({
         // API para Prism (CORS). El resto sigue con COOP/COEP para Scramjet.
         if (req.url && req.url.startsWith("/api/")) {
           res.setHeader("Access-Control-Allow-Origin", "*");
-          res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-          res.setHeader("Access-Control-Allow-Headers", "*");
+          res.setHeader(
+            "Access-Control-Allow-Methods",
+            "GET,POST,OPTIONS,HEAD"
+          );
+          res.setHeader(
+            "Access-Control-Allow-Headers",
+            "Content-Type, Cookie, X-Prism-Cookie, X-Requested-With, Accept, Accept-Language, Authorization"
+          );
+          res.setHeader(
+            "Access-Control-Expose-Headers",
+            "x-final-url,x-proxy-status,x-proxy-ms,content-type,set-cookie,x-set-cookie"
+          );
         } else {
           res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
           res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
@@ -55,13 +65,44 @@ function sendError(reply, status, code, message, extra = {}) {
     });
 }
 
+/** Recoge todas las cabeceras Set-Cookie (Node/fetch a veces solo da una). */
+function collectSetCookies(headers) {
+  const out = [];
+  if (typeof headers.getSetCookie === "function") {
+    try {
+      const list = headers.getSetCookie();
+      if (Array.isArray(list)) out.push(...list.filter(Boolean));
+    } catch (_) {}
+  }
+  if (!out.length) {
+    const single = headers.get("set-cookie");
+    if (single) out.push(single);
+  }
+  // raw Headers iteration (algunos runtimes)
+  if (!out.length && headers.raw && typeof headers.raw === "function") {
+    try {
+      const raw = headers.raw();
+      if (raw && raw["set-cookie"]) {
+        const v = raw["set-cookie"];
+        if (Array.isArray(v)) out.push(...v);
+        else if (v) out.push(v);
+      }
+    } catch (_) {}
+  }
+  return out;
+}
+
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET,POST,OPTIONS,HEAD",
+  "Access-Control-Allow-Headers":
+    "Content-Type, Cookie, X-Prism-Cookie, X-Requested-With, Accept, Accept-Language, Authorization",
+  "Access-Control-Expose-Headers":
+    "x-final-url,x-proxy-status,x-proxy-ms,content-type,set-cookie,x-set-cookie",
+};
+
 fastify.options("/api/proxy", async (req, reply) => {
-  return reply
-    .header("Access-Control-Allow-Origin", "*")
-    .header("Access-Control-Allow-Methods", "GET,OPTIONS")
-    .header("Access-Control-Allow-Headers", "*")
-    .code(204)
-    .send();
+  return reply.headers(CORS_HEADERS).code(204).send();
 });
 
 fastify.get("/api/health", async (req, reply) => {
@@ -69,11 +110,28 @@ fastify.get("/api/health", async (req, reply) => {
     ok: true,
     service: "hoshi-backend",
     proxy: "/api/proxy?url=",
+    cookies: true,
+    features: ["cookies", "set-cookie-forward", "x-prism-cookie", "roblox-ready"],
     time: new Date().toISOString(),
   });
 });
 
-fastify.get("/api/proxy", async (req, reply) => {
+/**
+ * Proxy con soporte de cookies para Prism OS / Roblox / otras apps.
+ *
+ * Uso:
+ *   GET  /api/proxy?url=https://www.roblox.com
+ *   Headers opcionales del cliente:
+ *     Cookie: ...                    (cookies del dominio)
+ *     X-Prism-Cookie: name=value; …  (alternativa, útil si el navegador bloquea Cookie en CORS)
+ *
+ * Respuesta:
+ *   - Body = contenido del sitio
+ *   - X-Final-Url, X-Proxy-Status, X-Proxy-Ms
+ *   - X-Set-Cookie: cookie1|||cookie2|||…  (todas las Set-Cookie unidas, fácil de parsear en el browser)
+ *   - set-cookie también se reenvía cuando el runtime lo permite
+ */
+async function handleProxy(req, reply) {
   const target = String(req.query.url || "").trim();
 
   if (!target) {
@@ -93,36 +151,88 @@ fastify.get("/api/proxy", async (req, reply) => {
     });
   }
 
+  // Cookies que envía el cliente (Prism Browser cookie jar)
+  const clientCookie =
+    (req.headers["x-prism-cookie"] || req.headers["cookie"] || "").toString().trim();
+
+  const method = (req.method || "GET").toUpperCase();
   const started = Date.now();
+
   try {
-    const res = await fetch(parsed.href, {
-      method: "GET",
+    const fetchHeaders = {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+      Accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9,es;q=0.8",
+      "Accept-Encoding": "identity",
+      "Cache-Control": "no-cache",
+      Pragma: "no-cache",
+      "Sec-Fetch-Dest": "document",
+      "Sec-Fetch-Mode": "navigate",
+      "Sec-Fetch-Site": "none",
+      "Upgrade-Insecure-Requests": "1",
+    };
+
+    if (clientCookie) {
+      fetchHeaders["Cookie"] = clientCookie;
+    }
+
+    // Referer / Origin útiles para Roblox y sitios que lo comprueban
+    try {
+      fetchHeaders["Referer"] = parsed.origin + "/";
+      fetchHeaders["Origin"] = parsed.origin;
+    } catch (_) {}
+
+    const fetchOpts = {
+      method: method === "HEAD" ? "GET" : method,
       redirect: "follow",
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/*,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9,es;q=0.8",
-      },
-    });
+      headers: fetchHeaders,
+    };
+
+    // POST opcional (forms, login) — body en texto
+    if (method === "POST" && req.body != null) {
+      const bodyStr =
+        typeof req.body === "string"
+          ? req.body
+          : typeof req.body === "object"
+            ? new URLSearchParams(req.body).toString()
+            : String(req.body);
+      fetchOpts.body = bodyStr;
+      if (!fetchHeaders["Content-Type"]) {
+        fetchHeaders["Content-Type"] = "application/x-www-form-urlencoded";
+      }
+    }
+
+    const res = await fetch(parsed.href, fetchOpts);
 
     const contentType =
       res.headers.get("content-type") || "application/octet-stream";
     const buf = Buffer.from(await res.arrayBuffer());
     const ms = Date.now() - started;
 
+    const setCookies = collectSetCookies(res.headers);
+
+    // Cabeceras de respuesta al cliente Prism
+    const replyHeaders = {
+      ...CORS_HEADERS,
+      "X-Final-Url": res.url || parsed.href,
+      "X-Proxy-Status": String(res.status),
+      "X-Proxy-Ms": String(ms),
+      "Content-Type": contentType,
+      "Cache-Control": "no-store",
+    };
+
+    // Todas las cookies en una sola cabecera fácil de leer (||| separador)
+    if (setCookies.length) {
+      replyHeaders["X-Set-Cookie"] = setCookies.join("|||");
+      try {
+        replyHeaders["Set-Cookie"] = setCookies[0];
+      } catch (_) {}
+    }
+
     return reply
-      .header("Access-Control-Allow-Origin", "*")
-      .header(
-        "Access-Control-Expose-Headers",
-        "x-final-url,x-proxy-status,x-proxy-ms,content-type"
-      )
-      .header("X-Final-Url", res.url || parsed.href)
-      .header("X-Proxy-Status", String(res.status))
-      .header("X-Proxy-Ms", String(ms))
-      .header("Content-Type", contentType)
-      .header("Cache-Control", "no-store")
+      .headers(replyHeaders)
       .code(res.status >= 400 ? 200 : res.status)
       .send(buf);
   } catch (err) {
@@ -140,11 +250,16 @@ fastify.get("/api/proxy", async (req, reply) => {
         code === "DNS_FAILED"
           ? "No se resolvió el dominio destino"
           : code === "TIMEOUT"
-          ? "El destino tardó demasiado"
-          : "El server no pudo descargar la URL",
+            ? "El destino tardó demasiado"
+            : "El server no pudo descargar la URL",
     });
   }
-});
+}
+
+fastify.get("/api/proxy", handleProxy);
+fastify.post("/api/proxy", handleProxy);
+fastify.head("/api/proxy", handleProxy);
+
 /* =================== END PRISM BACKEND =================== */
 
 fastify.register(fastifyStatic, {
@@ -183,9 +298,10 @@ fastify.server.on("listening", () => {
   const address = fastify.server.address();
   console.log("Listening on:");
   console.log(`\thttp://localhost:${address.port}`);
-  console.log(`\thttp://\( {hostname()}: \){address.port}`);
+  console.log(`\thttp://${hostname()}:${address.port}`);
   console.log(`\tAPI health: /api/health`);
   console.log(`\tAPI proxy:  /api/proxy?url=https://example.com`);
+  console.log(`\tCookies:    X-Prism-Cookie / Cookie + X-Set-Cookie`);
 });
 
 process.on("SIGINT", shutdown);
