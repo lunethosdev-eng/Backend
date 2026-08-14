@@ -22,7 +22,6 @@ const fastify = Fastify({
   serverFactory: (handler) => {
     return createServer()
       .on("request", (req, res) => {
-        // API para Prism (CORS). El resto sigue con COOP/COEP para Scramjet.
         if (req.url && req.url.startsWith("/api/")) {
           res.setHeader("Access-Control-Allow-Origin", "*");
           res.setHeader(
@@ -65,7 +64,6 @@ function sendError(reply, status, code, message, extra = {}) {
     });
 }
 
-/** Recoge todas las cabeceras Set-Cookie (Node/fetch a veces solo da una). */
 function collectSetCookies(headers) {
   const out = [];
   if (typeof headers.getSetCookie === "function") {
@@ -78,7 +76,6 @@ function collectSetCookies(headers) {
     const single = headers.get("set-cookie");
     if (single) out.push(single);
   }
-  // raw Headers iteration (algunos runtimes)
   if (!out.length && headers.raw && typeof headers.raw === "function") {
     try {
       const raw = headers.raw();
@@ -105,21 +102,6 @@ fastify.options("/api/proxy", async (req, reply) => {
   return reply.headers(CORS_HEADERS).code(204).send();
 });
 
-/**
- * Proxy con soporte de cookies para Prism OS / Roblox / otras apps.
- *
- * Uso:
- *   GET  /api/proxy?url=https://www.roblox.com
- *   Headers opcionales del cliente:
- *     Cookie: ...                    (cookies del dominio)
- *     X-Prism-Cookie: name=value; …  (alternativa, útil si el navegador bloquea Cookie en CORS)
- *
- * Respuesta:
- *   - Body = contenido del sitio
- *   - X-Final-Url, X-Proxy-Status, X-Proxy-Ms
- *   - X-Set-Cookie: cookie1|||cookie2|||…  (todas las Set-Cookie unidas, fácil de parsear en el browser)
- *   - set-cookie también se reenvía cuando el runtime lo permite
- */
 async function handleProxy(req, reply) {
   const target = String(req.query.url || "").trim();
 
@@ -140,9 +122,13 @@ async function handleProxy(req, reply) {
     });
   }
 
-  // Cookies que envía el cliente (Prism Browser cookie jar)
-  const clientCookie =
-    (req.headers["x-prism-cookie"] || req.headers["cookie"] || "").toString().trim();
+  const clientCookie = (
+    req.headers["x-prism-cookie"] ||
+    req.headers["cookie"] ||
+    ""
+  )
+    .toString()
+    .trim();
 
   const method = (req.method || "GET").toUpperCase();
   const started = Date.now();
@@ -167,7 +153,6 @@ async function handleProxy(req, reply) {
       fetchHeaders["Cookie"] = clientCookie;
     }
 
-    // Referer / Origin útiles para Roblox y sitios que lo comprueban
     try {
       fetchHeaders["Referer"] = parsed.origin + "/";
       fetchHeaders["Origin"] = parsed.origin;
@@ -179,7 +164,6 @@ async function handleProxy(req, reply) {
       headers: fetchHeaders,
     };
 
-    // POST opcional (forms, login) — body en texto
     if (method === "POST" && req.body != null) {
       const bodyStr =
         typeof req.body === "string"
@@ -202,7 +186,6 @@ async function handleProxy(req, reply) {
 
     const setCookies = collectSetCookies(res.headers);
 
-    // Cabeceras de respuesta al cliente Prism
     const replyHeaders = {
       ...CORS_HEADERS,
       "X-Final-Url": res.url || parsed.href,
@@ -212,7 +195,6 @@ async function handleProxy(req, reply) {
       "Cache-Control": "no-store",
     };
 
-    // Todas las cookies en una sola cabecera fácil de leer (||| separador)
     if (setCookies.length) {
       replyHeaders["X-Set-Cookie"] = setCookies.join("|||");
       try {
@@ -276,7 +258,7 @@ async function fetchJsonServer(url, ms = 8000) {
         Accept: "application/json",
       },
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) throw new Error("HTTP " + res.status);
     return await res.json();
   } finally {
     clearTimeout(t);
@@ -295,12 +277,11 @@ function pickBestAudio(streams) {
 }
 
 async function resolveYoutubeAudio(videoId) {
-  // Piped
   for (const base of YT_PIPED) {
     try {
-      const data = await fetchJsonServer(`\( {base}/streams/ \){videoId}`);
+      const data = await fetchJsonServer(base + "/streams/" + videoId);
       const best = pickBestAudio(data.audioStreams || []);
-      if (best?.url) {
+      if (best && best.url) {
         return {
           url: best.url,
           mime: best.mimeType || "audio/mp4",
@@ -313,10 +294,9 @@ async function resolveYoutubeAudio(videoId) {
     } catch (_) {}
   }
 
-  // Invidious
   for (const base of YT_INVIDIOUS) {
     try {
-      const data = await fetchJsonServer(`\( {base}/api/v1/videos/ \){videoId}`);
+      const data = await fetchJsonServer(base + "/api/v1/videos/" + videoId);
       const formats = data.adaptiveFormats || data.adaptive_formats || [];
       const audio = formats.filter((f) =>
         String(f.type || f.mimeType || "").startsWith("audio")
@@ -329,7 +309,7 @@ async function resolveYoutubeAudio(videoId) {
           quality: a.bitrate,
         }))
       );
-      if (best?.url) {
+      if (best && best.url) {
         return {
           url: best.url,
           mime: best.mimeType || "audio/mp4",
@@ -349,7 +329,6 @@ fastify.options("/api/yt-audio", async (req, reply) => {
   return reply.headers(CORS_HEADERS).code(204).send();
 });
 
-// GET /api/yt-audio?id=dQw4w9WgXcQ
 fastify.get("/api/yt-audio", async (req, reply) => {
   const id = String(req.query.id || "")
     .trim()
@@ -384,7 +363,6 @@ fastify.get("/api/yt-audio", async (req, reply) => {
   }
 });
 
-// Health
 fastify.get("/api/health", async (req, reply) => {
   return reply.header("Access-Control-Allow-Origin", "*").send({
     ok: true,
@@ -439,12 +417,12 @@ fastify.setNotFoundHandler((req, reply) => {
 fastify.server.on("listening", () => {
   const address = fastify.server.address();
   console.log("Listening on:");
-  console.log(`\thttp://localhost:${address.port}`);
-  console.log(`\thttp://\( {hostname()}: \){address.port}`);
-  console.log(`\tAPI health: /api/health`);
-  console.log(`\tAPI proxy:  /api/proxy?url=https://example.com`);
-  console.log(`\tAPI yt-audio: /api/yt-audio?id=VIDEO_ID`);
-  console.log(`\tCookies:    X-Prism-Cookie / Cookie + X-Set-Cookie`);
+  console.log("\thttp://localhost:" + address.port);
+  console.log("\thttp://" + hostname() + ":" + address.port);
+  console.log("\tAPI health: /api/health");
+  console.log("\tAPI proxy:  /api/proxy?url=https://example.com");
+  console.log("\tAPI yt-audio: /api/yt-audio?id=VIDEO_ID");
+  console.log("\tCookies:    X-Prism-Cookie / Cookie + X-Set-Cookie");
 });
 
 process.on("SIGINT", shutdown);
