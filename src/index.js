@@ -22,6 +22,7 @@ const fastify = Fastify({
   serverFactory: (handler) => {
     return createServer()
       .on("request", (req, res) => {
+        // API para Prism (CORS). El resto sigue con COOP/COEP para Scramjet.
         if (req.url && req.url.startsWith("/api/")) {
           res.setHeader("Access-Control-Allow-Origin", "*");
           res.setHeader(
@@ -64,6 +65,7 @@ function sendError(reply, status, code, message, extra = {}) {
     });
 }
 
+/** Recoge todas las cabeceras Set-Cookie (Node/fetch a veces solo da una). */
 function collectSetCookies(headers) {
   const out = [];
   if (typeof headers.getSetCookie === "function") {
@@ -76,6 +78,7 @@ function collectSetCookies(headers) {
     const single = headers.get("set-cookie");
     if (single) out.push(single);
   }
+  // raw Headers iteration (algunos runtimes)
   if (!out.length && headers.raw && typeof headers.raw === "function") {
     try {
       const raw = headers.raw();
@@ -102,6 +105,9 @@ fastify.options("/api/proxy", async (req, reply) => {
   return reply.headers(CORS_HEADERS).code(204).send();
 });
 
+/**
+ * Proxy con soporte de cookies para Prism OS / Roblox / otras apps.
+ */
 async function handleProxy(req, reply) {
   const target = String(req.query.url || "").trim();
 
@@ -122,13 +128,8 @@ async function handleProxy(req, reply) {
     });
   }
 
-  const clientCookie = (
-    req.headers["x-prism-cookie"] ||
-    req.headers["cookie"] ||
-    ""
-  )
-    .toString()
-    .trim();
+  const clientCookie =
+    (req.headers["x-prism-cookie"] || req.headers["cookie"] || "").toString().trim();
 
   const method = (req.method || "GET").toUpperCase();
   const started = Date.now();
@@ -246,9 +247,12 @@ const YT_INVIDIOUS = [
   "https://yewtu.be",
 ];
 
-async function fetchJsonServer(url, ms = 8000) {
+async function fetchJsonServer(url, ms) {
+  if (!ms) ms = 8000;
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), ms);
+  const t = setTimeout(function () {
+    ctrl.abort();
+  }, ms);
   try {
     const res = await fetch(url, {
       signal: ctrl.signal,
@@ -267,20 +271,25 @@ async function fetchJsonServer(url, ms = 8000) {
 
 function pickBestAudio(streams) {
   if (!Array.isArray(streams) || !streams.length) return null;
-  const sorted = [...streams].sort(
-    (a, b) => (b.bitrate || 0) - (a.bitrate || 0)
-  );
-  return (
-    sorted.find((s) => /mp4|m4a/i.test(s.mimeType || s.type || "")) ||
-    sorted[0]
-  );
+  const sorted = streams.slice().sort(function (a, b) {
+    return (b.bitrate || 0) - (a.bitrate || 0);
+  });
+  for (var i = 0; i < sorted.length; i++) {
+    var s = sorted[i];
+    var mime = s.mimeType || s.type || "";
+    if (/mp4|m4a/i.test(mime)) return s;
+  }
+  return sorted[0];
 }
 
 async function resolveYoutubeAudio(videoId) {
-  for (const base of YT_PIPED) {
+  var i, base, data, best, formats, audio, mapped;
+
+  for (i = 0; i < YT_PIPED.length; i++) {
+    base = YT_PIPED[i];
     try {
-      const data = await fetchJsonServer(base + "/streams/" + videoId);
-      const best = pickBestAudio(data.audioStreams || []);
+      data = await fetchJsonServer(base + "/streams/" + videoId);
+      best = pickBestAudio(data.audioStreams || []);
       if (best && best.url) {
         return {
           url: best.url,
@@ -291,24 +300,26 @@ async function resolveYoutubeAudio(videoId) {
           title: data.title || null,
         };
       }
-    } catch (_) {}
+    } catch (e) {}
   }
 
-  for (const base of YT_INVIDIOUS) {
+  for (i = 0; i < YT_INVIDIOUS.length; i++) {
+    base = YT_INVIDIOUS[i];
     try {
-      const data = await fetchJsonServer(base + "/api/v1/videos/" + videoId);
-      const formats = data.adaptiveFormats || data.adaptive_formats || [];
-      const audio = formats.filter((f) =>
-        String(f.type || f.mimeType || "").startsWith("audio")
-      );
-      const best = pickBestAudio(
-        audio.map((a) => ({
+      data = await fetchJsonServer(base + "/api/v1/videos/" + videoId);
+      formats = data.adaptiveFormats || data.adaptive_formats || [];
+      audio = formats.filter(function (f) {
+        return String(f.type || f.mimeType || "").indexOf("audio") === 0;
+      });
+      mapped = audio.map(function (a) {
+        return {
           url: a.url || a.uri,
           mimeType: a.type || a.mimeType,
-          bitrate: parseInt(a.bitrate) || 0,
+          bitrate: parseInt(a.bitrate, 10) || 0,
           quality: a.bitrate,
-        }))
-      );
+        };
+      });
+      best = pickBestAudio(mapped);
       if (best && best.url) {
         return {
           url: best.url,
@@ -319,49 +330,55 @@ async function resolveYoutubeAudio(videoId) {
           title: data.title || null,
         };
       }
-    } catch (_) {}
+    } catch (e) {}
   }
 
   return null;
 }
 
-fastify.options("/api/yt-audio", async (req, reply) => {
+fastify.options("/api/yt-audio", async function (req, reply) {
   return reply.headers(CORS_HEADERS).code(204).send();
 });
 
-fastify.get("/api/yt-audio", async (req, reply) => {
-  const id = String(req.query.id || "")
+fastify.get("/api/yt-audio", async function (req, reply) {
+  var id = String(req.query.id || "")
     .trim()
     .replace(/[^a-zA-Z0-9_-]/g, "");
   if (!id || id.length < 6) {
     return sendError(reply, 400, "MISSING_ID", "Falta ?id=VIDEO_ID");
   }
 
-  const started = Date.now();
+  var started = Date.now();
   try {
-    const audio = await resolveYoutubeAudio(id);
+    var audio = await resolveYoutubeAudio(id);
     if (!audio) {
       return sendError(
         reply,
         404,
         "NO_AUDIO",
-        "No se encontró stream de audio (instancias caídas o video bloqueado)",
-        { id, ms: Date.now() - started }
+        "No se encontro stream de audio",
+        { id: id, ms: Date.now() - started }
       );
     }
     return reply.header("Access-Control-Allow-Origin", "*").send({
       ok: true,
-      id,
-      ...audio,
+      id: id,
+      url: audio.url,
+      mime: audio.mime,
+      quality: audio.quality,
+      source: audio.source,
+      instance: audio.instance,
+      title: audio.title,
       ms: Date.now() - started,
     });
   } catch (err) {
     return sendError(reply, 502, "YT_AUDIO_FAIL", String(err.message || err), {
-      id,
+      id: id,
       ms: Date.now() - started,
     });
   }
 });
+/* =================== END YOUTUBE AUDIO =================== */
 
 fastify.get("/api/health", async (req, reply) => {
   return reply.header("Access-Control-Allow-Origin", "*").send({
@@ -380,7 +397,8 @@ fastify.get("/api/health", async (req, reply) => {
     time: new Date().toISOString(),
   });
 });
-/* =================== END PRISM + YT AUDIO =================== */
+
+/* =================== END PRISM BACKEND =================== */
 
 fastify.register(fastifyStatic, {
   root: publicPath,
