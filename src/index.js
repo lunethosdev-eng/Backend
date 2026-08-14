@@ -105,17 +105,6 @@ fastify.options("/api/proxy", async (req, reply) => {
   return reply.headers(CORS_HEADERS).code(204).send();
 });
 
-fastify.get("/api/health", async (req, reply) => {
-  return reply.header("Access-Control-Allow-Origin", "*").send({
-    ok: true,
-    service: "hoshi-backend",
-    proxy: "/api/proxy?url=",
-    cookies: true,
-    features: ["cookies", "set-cookie-forward", "x-prism-cookie", "roblox-ready"],
-    time: new Date().toISOString(),
-  });
-});
-
 /**
  * Proxy con soporte de cookies para Prism OS / Roblox / otras apps.
  *
@@ -260,7 +249,160 @@ fastify.get("/api/proxy", handleProxy);
 fastify.post("/api/proxy", handleProxy);
 fastify.head("/api/proxy", handleProxy);
 
-/* =================== END PRISM BACKEND =================== */
+/* ===================== YOUTUBE AUDIO (SIMPMUSIC) ===================== */
+const YT_PIPED = [
+  "https://api.piped.private.coffee",
+  "https://pipedapi.leptons.xyz",
+  "https://pipedapi.reallyaweso.me",
+  "https://pipedapi.drgns.space",
+  "https://pipedapi.orangenet.cc",
+  "https://pipedapi.ducks.party",
+];
+const YT_INVIDIOUS = [
+  "https://inv.nadeko.net",
+  "https://invidious.materialio.us",
+  "https://yewtu.be",
+];
+
+async function fetchJsonServer(url, ms = 8000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const res = await fetch(url, {
+      signal: ctrl.signal,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        Accept: "application/json",
+      },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+function pickBestAudio(streams) {
+  if (!Array.isArray(streams) || !streams.length) return null;
+  const sorted = [...streams].sort(
+    (a, b) => (b.bitrate || 0) - (a.bitrate || 0)
+  );
+  return (
+    sorted.find((s) => /mp4|m4a/i.test(s.mimeType || s.type || "")) ||
+    sorted[0]
+  );
+}
+
+async function resolveYoutubeAudio(videoId) {
+  // Piped
+  for (const base of YT_PIPED) {
+    try {
+      const data = await fetchJsonServer(`\( {base}/streams/ \){videoId}`);
+      const best = pickBestAudio(data.audioStreams || []);
+      if (best?.url) {
+        return {
+          url: best.url,
+          mime: best.mimeType || "audio/mp4",
+          quality: best.quality || best.bitrate,
+          source: "piped",
+          instance: base,
+          title: data.title || null,
+        };
+      }
+    } catch (_) {}
+  }
+
+  // Invidious
+  for (const base of YT_INVIDIOUS) {
+    try {
+      const data = await fetchJsonServer(`\( {base}/api/v1/videos/ \){videoId}`);
+      const formats = data.adaptiveFormats || data.adaptive_formats || [];
+      const audio = formats.filter((f) =>
+        String(f.type || f.mimeType || "").startsWith("audio")
+      );
+      const best = pickBestAudio(
+        audio.map((a) => ({
+          url: a.url || a.uri,
+          mimeType: a.type || a.mimeType,
+          bitrate: parseInt(a.bitrate) || 0,
+          quality: a.bitrate,
+        }))
+      );
+      if (best?.url) {
+        return {
+          url: best.url,
+          mime: best.mimeType || "audio/mp4",
+          quality: best.quality,
+          source: "invidious",
+          instance: base,
+          title: data.title || null,
+        };
+      }
+    } catch (_) {}
+  }
+
+  return null;
+}
+
+fastify.options("/api/yt-audio", async (req, reply) => {
+  return reply.headers(CORS_HEADERS).code(204).send();
+});
+
+// GET /api/yt-audio?id=dQw4w9WgXcQ
+fastify.get("/api/yt-audio", async (req, reply) => {
+  const id = String(req.query.id || "")
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]/g, "");
+  if (!id || id.length < 6) {
+    return sendError(reply, 400, "MISSING_ID", "Falta ?id=VIDEO_ID");
+  }
+
+  const started = Date.now();
+  try {
+    const audio = await resolveYoutubeAudio(id);
+    if (!audio) {
+      return sendError(
+        reply,
+        404,
+        "NO_AUDIO",
+        "No se encontró stream de audio (instancias caídas o video bloqueado)",
+        { id, ms: Date.now() - started }
+      );
+    }
+    return reply.header("Access-Control-Allow-Origin", "*").send({
+      ok: true,
+      id,
+      ...audio,
+      ms: Date.now() - started,
+    });
+  } catch (err) {
+    return sendError(reply, 502, "YT_AUDIO_FAIL", String(err.message || err), {
+      id,
+      ms: Date.now() - started,
+    });
+  }
+});
+
+// Health
+fastify.get("/api/health", async (req, reply) => {
+  return reply.header("Access-Control-Allow-Origin", "*").send({
+    ok: true,
+    service: "hoshi-backend",
+    proxy: "/api/proxy?url=",
+    ytAudio: "/api/yt-audio?id=VIDEO_ID",
+    cookies: true,
+    features: [
+      "cookies",
+      "set-cookie-forward",
+      "x-prism-cookie",
+      "roblox-ready",
+      "yt-audio",
+    ],
+    time: new Date().toISOString(),
+  });
+});
+/* =================== END PRISM + YT AUDIO =================== */
 
 fastify.register(fastifyStatic, {
   root: publicPath,
@@ -298,9 +440,10 @@ fastify.server.on("listening", () => {
   const address = fastify.server.address();
   console.log("Listening on:");
   console.log(`\thttp://localhost:${address.port}`);
-  console.log(`\thttp://${hostname()}:${address.port}`);
+  console.log(`\thttp://\( {hostname()}: \){address.port}`);
   console.log(`\tAPI health: /api/health`);
   console.log(`\tAPI proxy:  /api/proxy?url=https://example.com`);
+  console.log(`\tAPI yt-audio: /api/yt-audio?id=VIDEO_ID`);
   console.log(`\tCookies:    X-Prism-Cookie / Cookie + X-Set-Cookie`);
 });
 
