@@ -25,18 +25,8 @@ const fastify = Fastify({
         // API para Prism (CORS). El resto sigue con COOP/COEP para Scramjet.
         if (req.url && req.url.startsWith("/api/")) {
           res.setHeader("Access-Control-Allow-Origin", "*");
-          res.setHeader(
-            "Access-Control-Allow-Methods",
-            "GET,POST,OPTIONS,HEAD"
-          );
-          res.setHeader(
-            "Access-Control-Allow-Headers",
-            "Content-Type, Cookie, X-Prism-Cookie, X-Requested-With, Accept, Accept-Language, Authorization"
-          );
-          res.setHeader(
-            "Access-Control-Expose-Headers",
-            "x-final-url,x-proxy-status,x-proxy-ms,content-type,set-cookie,x-set-cookie"
-          );
+          res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
+          res.setHeader("Access-Control-Allow-Headers", "*");
         } else {
           res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
           res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
@@ -65,61 +55,37 @@ function sendError(reply, status, code, message, extra = {}) {
     });
 }
 
-/** Recoge todas las cabeceras Set-Cookie (Node/fetch a veces solo da una). */
-function collectSetCookies(headers) {
-  const out = [];
-  if (typeof headers.getSetCookie === "function") {
-    try {
-      const list = headers.getSetCookie();
-      if (Array.isArray(list)) out.push(...list.filter(Boolean));
-    } catch (_) {}
-  }
-  if (!out.length) {
-    const single = headers.get("set-cookie");
-    if (single) out.push(single);
-  }
-  // raw Headers iteration (algunos runtimes)
-  if (!out.length && headers.raw && typeof headers.raw === "function") {
-    try {
-      const raw = headers.raw();
-      if (raw && raw["set-cookie"]) {
-        const v = raw["set-cookie"];
-        if (Array.isArray(v)) out.push(...v);
-        else if (v) out.push(v);
-      }
-    } catch (_) {}
-  }
-  return out;
-}
-
-const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET,POST,OPTIONS,HEAD",
-  "Access-Control-Allow-Headers":
-    "Content-Type, Cookie, X-Prism-Cookie, X-Requested-With, Accept, Accept-Language, Authorization",
-  "Access-Control-Expose-Headers":
-    "x-final-url,x-proxy-status,x-proxy-ms,content-type,set-cookie,x-set-cookie",
-};
-
 fastify.options("/api/proxy", async (req, reply) => {
-  return reply.headers(CORS_HEADERS).code(204).send();
+  return reply
+    .header("Access-Control-Allow-Origin", "*")
+    .header("Access-Control-Allow-Methods", "GET,OPTIONS")
+    .header("Access-Control-Allow-Headers", "*")
+    .code(204)
+    .send();
 });
 
-/**
- * Proxy con soporte de cookies para Prism OS / Roblox / otras apps.
- */
-async function handleProxy(req, reply) {
+fastify.get("/api/health", async (req, reply) => {
+  return reply.header("Access-Control-Allow-Origin", "*").send({
+    ok: true,
+    service: "hoshi-backend",
+    proxy: "/api/proxy?url=",
+    ytAudio: "/api/yt-audio?id=VIDEO_ID",
+    time: new Date().toISOString(),
+  });
+});
+
+fastify.get("/api/proxy", async (req, reply) => {
   const target = String(req.query.url || "").trim();
 
   if (!target) {
-    return sendError(reply, 400, "MISSING_URL", "Falta ?url= en la petición");
+    return sendError(reply, 400, "MISSING_URL", "Falta ?url= en la peticion");
   }
 
   let parsed;
   try {
     parsed = new URL(target);
   } catch {
-    return sendError(reply, 400, "INVALID_URL", "URL inválida", { target });
+    return sendError(reply, 400, "INVALID_URL", "URL invalida", { target });
   }
 
   if (!["http:", "https:"].includes(parsed.protocol)) {
@@ -128,83 +94,36 @@ async function handleProxy(req, reply) {
     });
   }
 
-  const clientCookie =
-    (req.headers["x-prism-cookie"] || req.headers["cookie"] || "").toString().trim();
-
-  const method = (req.method || "GET").toUpperCase();
   const started = Date.now();
-
   try {
-    const fetchHeaders = {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-      Accept:
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-      "Accept-Language": "en-US,en;q=0.9,es;q=0.8",
-      "Accept-Encoding": "identity",
-      "Cache-Control": "no-cache",
-      Pragma: "no-cache",
-      "Sec-Fetch-Dest": "document",
-      "Sec-Fetch-Mode": "navigate",
-      "Sec-Fetch-Site": "none",
-      "Upgrade-Insecure-Requests": "1",
-    };
-
-    if (clientCookie) {
-      fetchHeaders["Cookie"] = clientCookie;
-    }
-
-    try {
-      fetchHeaders["Referer"] = parsed.origin + "/";
-      fetchHeaders["Origin"] = parsed.origin;
-    } catch (_) {}
-
-    const fetchOpts = {
-      method: method === "HEAD" ? "GET" : method,
+    const res = await fetch(parsed.href, {
+      method: "GET",
       redirect: "follow",
-      headers: fetchHeaders,
-    };
-
-    if (method === "POST" && req.body != null) {
-      const bodyStr =
-        typeof req.body === "string"
-          ? req.body
-          : typeof req.body === "object"
-            ? new URLSearchParams(req.body).toString()
-            : String(req.body);
-      fetchOpts.body = bodyStr;
-      if (!fetchHeaders["Content-Type"]) {
-        fetchHeaders["Content-Type"] = "application/x-www-form-urlencoded";
-      }
-    }
-
-    const res = await fetch(parsed.href, fetchOpts);
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/*,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,es;q=0.8",
+      },
+    });
 
     const contentType =
       res.headers.get("content-type") || "application/octet-stream";
     const buf = Buffer.from(await res.arrayBuffer());
     const ms = Date.now() - started;
 
-    const setCookies = collectSetCookies(res.headers);
-
-    const replyHeaders = {
-      ...CORS_HEADERS,
-      "X-Final-Url": res.url || parsed.href,
-      "X-Proxy-Status": String(res.status),
-      "X-Proxy-Ms": String(ms),
-      "Content-Type": contentType,
-      "Cache-Control": "no-store",
-    };
-
-    if (setCookies.length) {
-      replyHeaders["X-Set-Cookie"] = setCookies.join("|||");
-      try {
-        replyHeaders["Set-Cookie"] = setCookies[0];
-      } catch (_) {}
-    }
-
     return reply
-      .headers(replyHeaders)
+      .header("Access-Control-Allow-Origin", "*")
+      .header(
+        "Access-Control-Expose-Headers",
+        "x-final-url,x-proxy-status,x-proxy-ms,content-type"
+      )
+      .header("X-Final-Url", res.url || parsed.href)
+      .header("X-Proxy-Status", String(res.status))
+      .header("X-Proxy-Ms", String(ms))
+      .header("Content-Type", contentType)
+      .header("Cache-Control", "no-store")
       .code(res.status >= 400 ? 200 : res.status)
       .send(buf);
   } catch (err) {
@@ -220,17 +139,13 @@ async function handleProxy(req, reply) {
       ms: Date.now() - started,
       hint:
         code === "DNS_FAILED"
-          ? "No se resolvió el dominio destino"
+          ? "No se resolvio el dominio destino"
           : code === "TIMEOUT"
-            ? "El destino tardó demasiado"
+            ? "El destino tardo demasiado"
             : "El server no pudo descargar la URL",
     });
   }
-}
-
-fastify.get("/api/proxy", handleProxy);
-fastify.post("/api/proxy", handleProxy);
-fastify.head("/api/proxy", handleProxy);
+});
 
 /* ===================== YOUTUBE AUDIO (SIMPMUSIC) ===================== */
 const YT_PIPED = [
@@ -337,7 +252,12 @@ async function resolveYoutubeAudio(videoId) {
 }
 
 fastify.options("/api/yt-audio", async function (req, reply) {
-  return reply.headers(CORS_HEADERS).code(204).send();
+  return reply
+    .header("Access-Control-Allow-Origin", "*")
+    .header("Access-Control-Allow-Methods", "GET,OPTIONS")
+    .header("Access-Control-Allow-Headers", "*")
+    .code(204)
+    .send();
 });
 
 fastify.get("/api/yt-audio", async function (req, reply) {
@@ -352,13 +272,10 @@ fastify.get("/api/yt-audio", async function (req, reply) {
   try {
     var audio = await resolveYoutubeAudio(id);
     if (!audio) {
-      return sendError(
-        reply,
-        404,
-        "NO_AUDIO",
-        "No se encontro stream de audio",
-        { id: id, ms: Date.now() - started }
-      );
+      return sendError(reply, 404, "NO_AUDIO", "No se encontro stream de audio", {
+        id: id,
+        ms: Date.now() - started,
+      });
     }
     return reply.header("Access-Control-Allow-Origin", "*").send({
       ok: true,
@@ -379,25 +296,6 @@ fastify.get("/api/yt-audio", async function (req, reply) {
   }
 });
 /* =================== END YOUTUBE AUDIO =================== */
-
-fastify.get("/api/health", async (req, reply) => {
-  return reply.header("Access-Control-Allow-Origin", "*").send({
-    ok: true,
-    service: "hoshi-backend",
-    proxy: "/api/proxy?url=",
-    ytAudio: "/api/yt-audio?id=VIDEO_ID",
-    cookies: true,
-    features: [
-      "cookies",
-      "set-cookie-forward",
-      "x-prism-cookie",
-      "roblox-ready",
-      "yt-audio",
-    ],
-    time: new Date().toISOString(),
-  });
-});
-
 /* =================== END PRISM BACKEND =================== */
 
 fastify.register(fastifyStatic, {
@@ -440,7 +338,6 @@ fastify.server.on("listening", () => {
   console.log("\tAPI health: /api/health");
   console.log("\tAPI proxy:  /api/proxy?url=https://example.com");
   console.log("\tAPI yt-audio: /api/yt-audio?id=VIDEO_ID");
-  console.log("\tCookies:    X-Prism-Cookie / Cookie + X-Set-Cookie");
 });
 
 process.on("SIGINT", shutdown);
@@ -459,3 +356,4 @@ fastify.listen({
   port: port,
   host: "0.0.0.0",
 });
+
