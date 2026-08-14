@@ -24,8 +24,9 @@ const fastify = Fastify({
       .on("request", (req, res) => {
         if (req.url && req.url.startsWith("/api/")) {
           res.setHeader("Access-Control-Allow-Origin", "*");
-          res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
+          res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS,HEAD");
           res.setHeader("Access-Control-Allow-Headers", "*");
+          res.setHeader("Access-Control-Expose-Headers", "*");
         } else {
           res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
           res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
@@ -56,7 +57,7 @@ function sendError(reply, status, code, message, extra = {}) {
 fastify.options("/api/proxy", async (req, reply) => {
   return reply
     .header("Access-Control-Allow-Origin", "*")
-    .header("Access-Control-Allow-Methods", "GET,OPTIONS")
+    .header("Access-Control-Allow-Methods", "GET,OPTIONS,HEAD")
     .header("Access-Control-Allow-Headers", "*")
     .code(204)
     .send();
@@ -68,6 +69,7 @@ fastify.get("/api/health", async (req, reply) => {
     service: "hoshi-backend",
     proxy: "/api/proxy?url=",
     ytAudio: "/api/yt-audio?id=VIDEO_ID",
+    ytStream: "/api/yt-stream?id=VIDEO_ID",
     time: new Date().toISOString(),
   });
 });
@@ -153,8 +155,6 @@ const YT_PIPED = [
   "https://pipedapi.drgns.space",
   "https://pipedapi.orangenet.cc",
   "https://pipedapi.ducks.party",
-  "https://pipedapi.kavin.rocks",
-  "https://pipedapi.adminforge.de",
 ];
 
 async function fetchJsonServer(url, ms) {
@@ -180,7 +180,6 @@ async function fetchJsonServer(url, ms) {
 }
 
 function pickFromPiped(data) {
-  // 1) Prefer pure audio streams
   var streams = data.audioStreams || [];
   if (streams.length) {
     var sorted = streams.slice().sort(function (a, b) {
@@ -205,13 +204,11 @@ function pickFromPiped(data) {
     }
   }
 
-  // 2) Fallback: video streams that include audio (videoOnly === false)
   var videos = data.videoStreams || [];
   var withAudio = videos.filter(function (v) {
     return v && v.url && v.videoOnly === false;
   });
   if (withAudio.length) {
-    // Prefer lower quality for smaller size (audio playback)
     withAudio.sort(function (a, b) {
       var qa = parseInt(String(a.quality || "999"), 10) || 999;
       var qb = parseInt(String(b.quality || "999"), 10) || 999;
@@ -257,7 +254,7 @@ async function resolveYoutubeAudio(videoId) {
 fastify.options("/api/yt-audio", async function (req, reply) {
   return reply
     .header("Access-Control-Allow-Origin", "*")
-    .header("Access-Control-Allow-Methods", "GET,OPTIONS")
+    .header("Access-Control-Allow-Methods", "GET,OPTIONS,HEAD")
     .header("Access-Control-Allow-Headers", "*")
     .code(204)
     .send();
@@ -284,6 +281,8 @@ fastify.get("/api/yt-audio", async function (req, reply) {
       ok: true,
       id: id,
       url: audio.url,
+      // URL lista para el player: pasa por este backend (CORS ok)
+      streamUrl: "https://backend-1-k2na.onrender.com/api/yt-stream?id=" + id,
       mime: audio.mime,
       quality: audio.quality,
       kind: audio.kind,
@@ -297,6 +296,77 @@ fastify.get("/api/yt-audio", async function (req, reply) {
       id: id,
       ms: Date.now() - started,
     });
+  }
+});
+
+// Stream proxy: el navegador reproduce desde TU dominio (sin CORS roto)
+fastify.options("/api/yt-stream", async function (req, reply) {
+  return reply
+    .header("Access-Control-Allow-Origin", "*")
+    .header("Access-Control-Allow-Methods", "GET,OPTIONS,HEAD")
+    .header("Access-Control-Allow-Headers", "*")
+    .header("Access-Control-Expose-Headers", "Content-Type,Content-Length,Accept-Ranges,Content-Range")
+    .code(204)
+    .send();
+});
+
+fastify.get("/api/yt-stream", async function (req, reply) {
+  var id = String(req.query.id || "")
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]/g, "");
+  if (!id || id.length < 6) {
+    return sendError(reply, 400, "MISSING_ID", "Falta ?id=VIDEO_ID");
+  }
+
+  try {
+    var audio = await resolveYoutubeAudio(id);
+    if (!audio || !audio.url) {
+      return sendError(reply, 404, "NO_AUDIO", "No se encontro stream");
+    }
+
+    var headers = {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+      Accept: "*/*",
+    };
+    // Support range requests for seeking
+    if (req.headers.range) {
+      headers.Range = req.headers.range;
+    }
+
+    var upstream = await fetch(audio.url, {
+      headers: headers,
+      redirect: "follow",
+    });
+
+    if (!upstream.ok && upstream.status !== 206) {
+      return sendError(reply, 502, "UPSTREAM_FAIL", "Stream upstream " + upstream.status);
+    }
+
+    var contentType = upstream.headers.get("content-type") || audio.mime || "video/mp4";
+    var buf = Buffer.from(await upstream.arrayBuffer());
+
+    var replyHeaders = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Expose-Headers":
+        "Content-Type,Content-Length,Accept-Ranges,Content-Range",
+      "Content-Type": contentType,
+      "Cache-Control": "no-store",
+      "Accept-Ranges": "bytes",
+    };
+
+    var contentRange = upstream.headers.get("content-range");
+    if (contentRange) replyHeaders["Content-Range"] = contentRange;
+    var contentLength = upstream.headers.get("content-length");
+    if (contentLength) replyHeaders["Content-Length"] = contentLength;
+    else replyHeaders["Content-Length"] = String(buf.length);
+
+    return reply
+      .headers(replyHeaders)
+      .code(upstream.status === 206 ? 206 : 200)
+      .send(buf);
+  } catch (err) {
+    return sendError(reply, 502, "STREAM_FAIL", String(err.message || err));
   }
 });
 /* =================== END YOUTUBE AUDIO =================== */
@@ -339,8 +409,9 @@ fastify.server.on("listening", () => {
   console.log("\thttp://localhost:" + address.port);
   console.log("\thttp://" + hostname() + ":" + address.port);
   console.log("\tAPI health: /api/health");
-  console.log("\tAPI proxy:  /api/proxy?url=https://example.com");
-  console.log("\tAPI yt-audio: /api/yt-audio?id=VIDEO_ID");
+  console.log("\tAPI proxy:  /api/proxy?url=");
+  console.log("\tAPI yt-audio: /api/yt-audio?id=");
+  console.log("\tAPI yt-stream: /api/yt-stream?id=");
 });
 
 process.on("SIGINT", shutdown);
