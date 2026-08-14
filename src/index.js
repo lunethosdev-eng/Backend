@@ -329,7 +329,6 @@ fastify.get("/api/yt-stream", async function (req, reply) {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
       Accept: "*/*",
     };
-    // Support range requests for seeking
     if (req.headers.range) {
       headers.Range = req.headers.range;
     }
@@ -340,31 +339,56 @@ fastify.get("/api/yt-stream", async function (req, reply) {
     });
 
     if (!upstream.ok && upstream.status !== 206) {
-      return sendError(reply, 502, "UPSTREAM_FAIL", "Stream upstream " + upstream.status);
+      return sendError(
+        reply,
+        502,
+        "UPSTREAM_FAIL",
+        "Stream upstream " + upstream.status
+      );
     }
 
-    var contentType = upstream.headers.get("content-type") || audio.mime || "video/mp4";
-    var buf = Buffer.from(await upstream.arrayBuffer());
+    var contentType =
+      upstream.headers.get("content-type") || audio.mime || "video/mp4";
 
-    var replyHeaders = {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Expose-Headers":
-        "Content-Type,Content-Length,Accept-Ranges,Content-Range",
-      "Content-Type": contentType,
-      "Cache-Control": "no-store",
-      "Accept-Ranges": "bytes",
-    };
+    // Stream pipe (no cargar todo en RAM)
+    reply.hijack();
+    var res = reply.raw;
+    res.statusCode = upstream.status === 206 ? 206 : 200;
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader(
+      "Access-Control-Expose-Headers",
+      "Content-Type,Content-Length,Accept-Ranges,Content-Range"
+    );
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Accept-Ranges", "bytes");
 
     var contentRange = upstream.headers.get("content-range");
-    if (contentRange) replyHeaders["Content-Range"] = contentRange;
+    if (contentRange) res.setHeader("Content-Range", contentRange);
     var contentLength = upstream.headers.get("content-length");
-    if (contentLength) replyHeaders["Content-Length"] = contentLength;
-    else replyHeaders["Content-Length"] = String(buf.length);
+    if (contentLength) res.setHeader("Content-Length", contentLength);
 
-    return reply
-      .headers(replyHeaders)
-      .code(upstream.status === 206 ? 206 : 200)
-      .send(buf);
+    if (!upstream.body) {
+      res.end();
+      return;
+    }
+
+    var reader = upstream.body.getReader();
+    function pump() {
+      return reader.read().then(function (result) {
+        if (result.done) {
+          res.end();
+          return;
+        }
+        res.write(Buffer.from(result.value));
+        return pump();
+      });
+    }
+    return pump().catch(function () {
+      try {
+        res.end();
+      } catch (e) {}
+    });
   } catch (err) {
     return sendError(reply, 502, "STREAM_FAIL", String(err.message || err));
   }
