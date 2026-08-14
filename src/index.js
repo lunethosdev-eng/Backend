@@ -22,7 +22,6 @@ const fastify = Fastify({
   serverFactory: (handler) => {
     return createServer()
       .on("request", (req, res) => {
-        // API para Prism (CORS). El resto sigue con COOP/COEP para Scramjet.
         if (req.url && req.url.startsWith("/api/")) {
           res.setHeader("Access-Control-Allow-Origin", "*");
           res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
@@ -40,7 +39,6 @@ const fastify = Fastify({
   },
 });
 
-/* ===================== PRISM BACKEND ===================== */
 function sendError(reply, status, code, message, extra = {}) {
   return reply
     .header("Access-Control-Allow-Origin", "*")
@@ -155,15 +153,12 @@ const YT_PIPED = [
   "https://pipedapi.drgns.space",
   "https://pipedapi.orangenet.cc",
   "https://pipedapi.ducks.party",
-];
-const YT_INVIDIOUS = [
-  "https://inv.nadeko.net",
-  "https://invidious.materialio.us",
-  "https://yewtu.be",
+  "https://pipedapi.kavin.rocks",
+  "https://pipedapi.adminforge.de",
 ];
 
 async function fetchJsonServer(url, ms) {
-  if (!ms) ms = 8000;
+  if (!ms) ms = 9000;
   const ctrl = new AbortController();
   const t = setTimeout(function () {
     ctrl.abort();
@@ -184,63 +179,71 @@ async function fetchJsonServer(url, ms) {
   }
 }
 
-function pickBestAudio(streams) {
-  if (!Array.isArray(streams) || !streams.length) return null;
-  const sorted = streams.slice().sort(function (a, b) {
-    return (b.bitrate || 0) - (a.bitrate || 0);
-  });
-  for (var i = 0; i < sorted.length; i++) {
-    var s = sorted[i];
-    var mime = s.mimeType || s.type || "";
-    if (/mp4|m4a/i.test(mime)) return s;
+function pickFromPiped(data) {
+  // 1) Prefer pure audio streams
+  var streams = data.audioStreams || [];
+  if (streams.length) {
+    var sorted = streams.slice().sort(function (a, b) {
+      return (b.bitrate || 0) - (a.bitrate || 0);
+    });
+    var best = null;
+    for (var i = 0; i < sorted.length; i++) {
+      var m = sorted[i].mimeType || "";
+      if (/mp4|m4a/i.test(m)) {
+        best = sorted[i];
+        break;
+      }
+    }
+    if (!best) best = sorted[0];
+    if (best && best.url) {
+      return {
+        url: best.url,
+        mime: best.mimeType || "audio/mp4",
+        quality: best.quality || best.bitrate,
+        kind: "audio",
+      };
+    }
   }
-  return sorted[0];
+
+  // 2) Fallback: video streams that include audio (videoOnly === false)
+  var videos = data.videoStreams || [];
+  var withAudio = videos.filter(function (v) {
+    return v && v.url && v.videoOnly === false;
+  });
+  if (withAudio.length) {
+    // Prefer lower quality for smaller size (audio playback)
+    withAudio.sort(function (a, b) {
+      var qa = parseInt(String(a.quality || "999"), 10) || 999;
+      var qb = parseInt(String(b.quality || "999"), 10) || 999;
+      return qa - qb;
+    });
+    var v = withAudio[0];
+    return {
+      url: v.url,
+      mime: v.mimeType || "video/mp4",
+      quality: v.quality || "mixed",
+      kind: "video+audio",
+    };
+  }
+
+  return null;
 }
 
 async function resolveYoutubeAudio(videoId) {
-  var i, base, data, best, formats, audio, mapped;
+  var i, base, data, picked;
 
   for (i = 0; i < YT_PIPED.length; i++) {
     base = YT_PIPED[i];
     try {
       data = await fetchJsonServer(base + "/streams/" + videoId);
-      best = pickBestAudio(data.audioStreams || []);
-      if (best && best.url) {
+      picked = pickFromPiped(data);
+      if (picked && picked.url) {
         return {
-          url: best.url,
-          mime: best.mimeType || "audio/mp4",
-          quality: best.quality || best.bitrate,
+          url: picked.url,
+          mime: picked.mime,
+          quality: picked.quality,
+          kind: picked.kind,
           source: "piped",
-          instance: base,
-          title: data.title || null,
-        };
-      }
-    } catch (e) {}
-  }
-
-  for (i = 0; i < YT_INVIDIOUS.length; i++) {
-    base = YT_INVIDIOUS[i];
-    try {
-      data = await fetchJsonServer(base + "/api/v1/videos/" + videoId);
-      formats = data.adaptiveFormats || data.adaptive_formats || [];
-      audio = formats.filter(function (f) {
-        return String(f.type || f.mimeType || "").indexOf("audio") === 0;
-      });
-      mapped = audio.map(function (a) {
-        return {
-          url: a.url || a.uri,
-          mimeType: a.type || a.mimeType,
-          bitrate: parseInt(a.bitrate, 10) || 0,
-          quality: a.bitrate,
-        };
-      });
-      best = pickBestAudio(mapped);
-      if (best && best.url) {
-        return {
-          url: best.url,
-          mime: best.mimeType || "audio/mp4",
-          quality: best.quality,
-          source: "invidious",
           instance: base,
           title: data.title || null,
         };
@@ -283,6 +286,7 @@ fastify.get("/api/yt-audio", async function (req, reply) {
       url: audio.url,
       mime: audio.mime,
       quality: audio.quality,
+      kind: audio.kind,
       source: audio.source,
       instance: audio.instance,
       title: audio.title,
@@ -296,7 +300,6 @@ fastify.get("/api/yt-audio", async function (req, reply) {
   }
 });
 /* =================== END YOUTUBE AUDIO =================== */
-/* =================== END PRISM BACKEND =================== */
 
 fastify.register(fastifyStatic, {
   root: publicPath,
