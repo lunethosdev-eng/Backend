@@ -147,14 +147,31 @@ fastify.get("/api/proxy", async (req, reply) => {
   }
 });
 
-/* ===================== YOUTUBE AUDIO (SIMPMUSIC) ===================== */
+/* ===================== YOUTUBE AUDIO ===================== */
 const YT_PIPED = [
   "https://api.piped.private.coffee",
+  "https://pipedapi.kavin.rocks",
   "https://pipedapi.leptons.xyz",
-  "https://pipedapi.reallyaweso.me",
-  "https://pipedapi.drgns.space",
-  "https://pipedapi.orangenet.cc",
+  "https://pipedapi.adminforge.de",
   "https://pipedapi.ducks.party",
+  "https://pipedapi.reallyaweso.me",
+  "https://pipedapi-libre.kavin.rocks",
+  "https://pipedapi.drgns.space",
+  "https://pipedapi.syncpundit.io",
+  "https://pipedapi.orangenet.cc",
+];
+
+const YT_INVIDIOUS = [
+  "https://inv.nadeko.net",
+  "https://yewtu.be",
+  "https://invidious.nerdvpn.de",
+  "https://invidious.privacyredirect.com",
+  "https://vid.puffyan.us",
+];
+
+const COBALT_APIS = [
+  "https://api.cobalt.tools/",
+  "https://cobalt-api.kwiatekm.lol/",
 ];
 
 async function fetchJsonServer(url, ms) {
@@ -226,13 +243,81 @@ function pickFromPiped(data) {
   return null;
 }
 
-async function resolveYoutubeAudio(videoId) {
-  var i, base, data, picked;
+function pickFromInvidious(data) {
+  var formats = [].concat(data.adaptiveFormats || [], data.formatStreams || []);
+  var audio = formats.filter(function (f) {
+    return f && f.url && ((f.type && f.type.indexOf("audio") === 0) || (f.mimeType && /audio/i.test(f.mimeType)));
+  });
+  if (!audio.length) {
+    // fallback: any progressive stream with audio
+    audio = formats.filter(function (f) {
+      return f && f.url && f.type && /video\/mp4/i.test(f.type) && !/video only/i.test(f.type);
+    });
+  }
+  if (!audio.length) return null;
+  audio.sort(function (a, b) {
+    return (parseInt(b.bitrate || b.audioBitrate || 0, 10) || 0) -
+           (parseInt(a.bitrate || a.audioBitrate || 0, 10) || 0);
+  });
+  var best = audio[0];
+  return {
+    url: best.url,
+    mime: best.type || best.mimeType || "audio/mp4",
+    quality: best.bitrate || best.audioBitrate || best.quality || "audio",
+    kind: "audio",
+  };
+}
 
+async function resolveViaCobalt(videoId) {
+  var i, api, res, data, url;
+  for (i = 0; i < COBALT_APIS.length; i++) {
+    api = COBALT_APIS[i];
+    try {
+      res = await fetch(api, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          "User-Agent": "Mozilla/5.0 GojofyBackend/2.0",
+        },
+        body: JSON.stringify({
+          url: "https://www.youtube.com/watch?v=" + videoId,
+          downloadMode: "audio",
+          audioFormat: "mp3",
+          filenameStyle: "basic",
+        }),
+        signal: AbortSignal.timeout(12000),
+      });
+      if (!res.ok) continue;
+      data = await res.json();
+      // cobalt v7: status tunnel/redirect/picker
+      url = data.url || data.audio || (data.tunnel && data.tunnel) || null;
+      if (!url && data.status === "tunnel" && data.url) url = data.url;
+      if (!url && data.status === "redirect" && data.url) url = data.url;
+      if (url) {
+        return {
+          url: url,
+          mime: "audio/mpeg",
+          quality: "cobalt",
+          kind: "audio",
+          source: "cobalt",
+          instance: api,
+          title: data.filename || null,
+        };
+      }
+    } catch (e) {}
+  }
+  return null;
+}
+
+async function resolveYoutubeAudio(videoId) {
+  var i, base, data, picked, cobalt;
+
+  // 1) Piped
   for (i = 0; i < YT_PIPED.length; i++) {
     base = YT_PIPED[i];
     try {
-      data = await fetchJsonServer(base + "/streams/" + videoId);
+      data = await fetchJsonServer(base + "/streams/" + videoId, 7000);
       picked = pickFromPiped(data);
       if (picked && picked.url) {
         return {
@@ -247,6 +332,30 @@ async function resolveYoutubeAudio(videoId) {
       }
     } catch (e) {}
   }
+
+  // 2) Invidious
+  for (i = 0; i < YT_INVIDIOUS.length; i++) {
+    base = YT_INVIDIOUS[i];
+    try {
+      data = await fetchJsonServer(base + "/api/v1/videos/" + videoId, 7000);
+      picked = pickFromInvidious(data);
+      if (picked && picked.url) {
+        return {
+          url: picked.url,
+          mime: picked.mime,
+          quality: picked.quality,
+          kind: picked.kind,
+          source: "invidious",
+          instance: base,
+          title: data.title || null,
+        };
+      }
+    } catch (e) {}
+  }
+
+  // 3) Cobalt public APIs
+  cobalt = await resolveViaCobalt(videoId);
+  if (cobalt) return cobalt;
 
   return null;
 }
@@ -277,12 +386,13 @@ fastify.get("/api/yt-audio", async function (req, reply) {
         ms: Date.now() - started,
       });
     }
+    var host = (req.headers["x-forwarded-proto"] || "https") + "://" + (req.headers["x-forwarded-host"] || req.headers.host || "backend-1-k2na.onrender.com");
     return reply.header("Access-Control-Allow-Origin", "*").send({
       ok: true,
       id: id,
       url: audio.url,
       // URL lista para el player: pasa por este backend (CORS ok)
-      streamUrl: "https://backend-1-k2na.onrender.com/api/yt-stream?id=" + id,
+      streamUrl: host + "/api/yt-stream?id=" + id,
       mime: audio.mime,
       quality: audio.quality,
       kind: audio.kind,
@@ -454,4 +564,5 @@ fastify.listen({
   port: port,
   host: "0.0.0.0",
 });
+
 
