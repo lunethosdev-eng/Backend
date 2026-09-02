@@ -186,3 +186,66 @@ html, body {
 .log-ok { color: var(--ok); }
 .log-warn { color: var(--warn); }
 .log-err { color: var(--err); font-weight: 600; }
+
+
+/* ===== Prism OS embed: no HOSHI UI, full viewport game ===== */
+html.prism-embed, body.prism-embed {
+  margin: 0 !important;
+  padding: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  overflow: hidden !important;
+  background: #000 !important;
+}
+body.prism-embed #app.prism-embed-app,
+body.prism-embed #app {
+  display: block !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+body.prism-embed .term-top,
+body.prism-embed .status-row,
+body.prism-embed .cmd-row,
+body.prism-embed .log-panel,
+body.prism-embed .panel-title,
+body.prism-embed .home-view,
+body.prism-embed #sj-error,
+body.prism-embed #sj-error-code {
+  display: none !important;
+}
+body.prism-embed .split {
+  display: block !important;
+  width: 100% !important;
+  height: 100% !important;
+  margin: 0 !important;
+  border: 0 !important;
+}
+body.prism-embed .view-panel {
+  width: 100% !important;
+  height: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+}
+body.prism-embed #iframes-container,
+body.prism-embed #iframes-container.active {
+  display: block !important;
+  width: 100% !important;
+  height: 100% !important;
+  position: fixed !important;
+  inset: 0 !important;
+  z-index: 9999 !important;
+}
+body.prism-embed .proxy-frame,
+body.prism-embed iframe.proxy-frame,
+body.prism-embed #iframes-container iframe {
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  border: 0 !important;
+  margin: 0 !important;
+}
+
