@@ -22,14 +22,28 @@ const fastify = Fastify({
   serverFactory: (handler) => {
     return createServer()
       .on("request", (req, res) => {
-        if (req.url && req.url.startsWith("/api/")) {
-          res.setHeader("Access-Control-Allow-Origin", "*");
-          res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS,HEAD");
-          res.setHeader("Access-Control-Allow-Headers", "*");
-          res.setHeader("Access-Control-Expose-Headers", "*");
+        const url = req.url || "";
+        const isApi = url.startsWith("/api/");
+        const isEmbed = /[?&]embed=1(?:&|$)/.test(url) || /[?&]prism=1(?:&|$)/.test(url);
+
+        // Always allow Prism / Netlify to frame this backend
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS,HEAD");
+        res.setHeader("Access-Control-Allow-Headers", "*");
+        res.setHeader("Access-Control-Expose-Headers", "*");
+
+        // Critical: do NOT send X-Frame-Options so Prism windows can embed us
+        // (omit header entirely)
+
+        if (isApi) {
+          // API only
+        } else if (isEmbed) {
+          // Embedded in Prism OS — no COOP/COEP (they break cross-origin iframes)
+          res.setHeader("Content-Security-Policy", "frame-ancestors *");
         } else {
-          res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
-          res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
+          // Standalone terminal UI — keep isolation but still allow framing by Prism
+          res.setHeader("Content-Security-Policy", "frame-ancestors *");
+          // COEP optional; skip so game iframes inside Scramjet work more often
         }
         handler(req, res);
       })
@@ -39,6 +53,20 @@ const fastify = Fastify({
       });
   },
 });
+
+function stripFrameHeaders(reply) {
+  // Allow embedding proxied HTML in Prism iframes
+  try {
+    reply.removeHeader("x-frame-options");
+    reply.removeHeader("X-Frame-Options");
+    reply.removeHeader("content-security-policy");
+    reply.removeHeader("Content-Security-Policy");
+  } catch (_) {}
+  return reply
+    .header("Access-Control-Allow-Origin", "*")
+    .header("Content-Security-Policy", "frame-ancestors *")
+    .header("X-Prism-Proxy", "1");
+}
 
 function sendError(reply, status, code, message, extra = {}) {
   return reply
@@ -120,6 +148,9 @@ fastify.get("/api/proxy", async (req, reply) => {
         "x-final-url,x-proxy-status,x-proxy-ms,content-type"
       )
       .header("X-Final-Url", res.url || parsed.href)
+      .header("Content-Security-Policy", "frame-ancestors *")
+      .header("X-Prism-Proxy", "1")
+      // note: upstream X-Frame-Options is NOT forwarded (we only set our headers)
       .header("X-Proxy-Status", String(res.status))
       .header("X-Proxy-Ms", String(ms))
       .header("Content-Type", contentType)
@@ -564,5 +595,15 @@ fastify.listen({
   port: port,
   host: "0.0.0.0",
 });
+
+// Soft keep-alive: while the process is running, touch health every 9 min.
+// Does NOT prevent Render free spin-down when the process is already slept.
+(function keepAliveSelfPing() {
+  const port = process.env.PORT || 3000;
+  const url = `http://127.0.0.1:${port}/api/health`;
+  setInterval(() => {
+    fetch(url).catch(() => {});
+  }, 9 * 60 * 1000);
+})();
 
 
