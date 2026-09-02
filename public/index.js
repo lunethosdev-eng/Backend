@@ -260,18 +260,32 @@ form.addEventListener("submit", async (event) => {
   }
 });
 
-/* deep link for Prism: /?go=URL */
+/* deep link for Prism: /?go=URL&embed=1 — hide HOSHI chrome, full-bleed game */
 (function prismDeepLink() {
   try {
     const params = new URLSearchParams(location.search);
     const target = params.get("go") || params.get("url");
+    const embed = params.get("embed") === "1" || params.get("prism") === "1";
+
+    if (embed) {
+      document.documentElement.classList.add("prism-embed");
+      document.body.classList.add("prism-embed");
+      // Hide terminal chrome ASAP
+      const app = document.getElementById("app");
+      if (app) app.classList.add("prism-embed-app");
+      log("info", "Prism embed mode");
+    }
+
     if (!target) return;
     log("info", "deep link", target);
     setTimeout(function () {
       address.value = target;
-      form.dispatchEvent(new Event("submit"));
-      try { history.replaceState(null, "", location.pathname); } catch (e) {}
-    }, 600);
+      form.dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
+      // Keep query in embed mode so refresh still works; strip only when not embed
+      if (!embed) {
+        try { history.replaceState(null, "", location.pathname); } catch (e) {}
+      }
+    }, embed ? 400 : 600);
   } catch (e) {}
 })();
 
@@ -280,3 +294,4 @@ setPill(pillSw, "SW: …", "warn");
 setPill(pillTransport, "Transport: …", "warn");
 log("info", "Hoshi terminal ready (no boot screen)");
 checkHealth();
+
